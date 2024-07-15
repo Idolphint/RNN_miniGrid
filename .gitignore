@@ -1,0 +1,5 @@
+
+*.gif
+log
+recurrent-ppo
+weights
