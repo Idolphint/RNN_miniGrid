@@ -16,6 +16,7 @@ max_ep_len = 100
 update_timestep = 4 * max_ep_len
 actor_lr = 3e-4
 critic_lr = 1e-3
+lr_change_step = (100000, 1000000)
 eps_clip = 0.2
 gamma = 0.93
 
@@ -69,7 +70,7 @@ def train():
 
         if (t+1) % update_timestep == 0:
             print(epi, t, epi_reward)
-            ppo_agent.update()
+            ppo_agent.update(writer)
         if (t+1) % 10000 == 0:
             if last_save_reward < epi_reward:
                 ppo_agent.save(ckpt_path)
@@ -83,5 +84,39 @@ def train():
     writer.close()
 
 
+def play_and_collect_data(test=True, t = 0):
+    avg_reward = 0
+    for i in range(ppo_agent.buffer.num_game_per_batch):
+        terminated = False
+        truncated = False
+        observation, info = env.reset()
+        while not (terminated or truncated):
+            img = observation["image"].reshape(7 * 7, 3)
+            dir = observation["direction"]
+            state = np.zeros([7 * 7 + 1, 3])
+            state[49, 0] = dir
+            state[:49, :] = img
+
+            action, observation, reward, terminated, truncated = ppo_agent.play(env, state, test)
+            writer.add_scalar("reward", reward, global_step=t)
+            t += 1
+
+            avg_reward += reward
+    return avg_reward / (ppo_agent.buffer.num_game_per_batch), t
+
+
+def train_by_play():
+    last_saved_reward = -100
+    global_timestep = 0
+    while True:
+        avg_reward, global_timestep = play_and_collect_data(test=False, t=global_timestep)
+        print("avg_reward", avg_reward, t)
+        if avg_reward > last_saved_reward:
+            ppo_agent.save(ckpt_path)
+            last_saved_reward = avg_reward
+        ppo_agent.update_new(writer)
+
+
 if __name__ == '__main__':
-    train()
+    # train()
+    train_by_play()

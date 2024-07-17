@@ -1,73 +1,55 @@
 import torch
 import torch.nn as nn
 from torch.distributions import MultivariateNormal
+from rolloutBuffer import RolloutBuffer
 from torch.distributions import Categorical
 
 device = torch.device("cuda:0")
 
-class RolloutBuffer:
-    def __init__(self):
-        self.actions = []
-        self.states = []
-        self.logprobs = []
-        self.rewards = []
-        self.state_values = []
-        self.is_terminals = []
-        self.hidden = []
-
-    def clear(self):
-        del self.actions[:]
-        del self.states[:]
-        del self.logprobs[:]
-        del self.rewards[:]
-        del self.state_values[:]
-        del self.is_terminals[:]
-        del self.hidden[:]
-
 
 class RNN_AC(nn.Module):
-    def __init__(self, obs_dim, state_dim=64, action_dim=7):
+    def __init__(self, obs_dim, hidden_dim=64, action_dim=7):
         super(RNN_AC, self).__init__()
         self.obs_dim = obs_dim
-        self.state_dim = state_dim  # state_dim=hidden_dim=out_dim
+        self.hidden_dim = hidden_dim  # state_dim=hidden_dim=out_dim
 
-        self.initializer = nn.Linear(obs_dim, state_dim)
+        self.initializer = nn.Linear(obs_dim, hidden_dim)
 
         self.pre_embedding = nn.Sequential(
-            nn.Linear(obs_dim, state_dim),
+            nn.Linear(obs_dim, hidden_dim),
             nn.LeakyReLU(),
         )
 
-        self.RNN = nn.GRU(state_dim, state_dim, num_layers=1)
+        self.RNN = nn.GRU(hidden_dim, hidden_dim, num_layers=1, batch_first=True)
 
-        # self.RNN_norm = nn.LayerNorm(state_dim)
+        # self.RNN_norm = nn.LayerNorm( hidden_dim)
 
         self.actor = nn.Sequential(
-            nn.Linear(state_dim, 64),
+            nn.Linear(hidden_dim, 64),
             nn.Tanh(),
             nn.Linear(64, action_dim),
             nn.Softmax(dim=-1)
         )
 
         self.critic = nn.Sequential(
-            nn.Linear(state_dim, 64),
+            nn.Linear(hidden_dim, 64),
             nn.Tanh(),
             nn.Linear(64, 1)
         )
 
     def init_hidden(self, batch_size=1):
-        return torch.zeros((batch_size, self.state_dim)).to(device)
-        # return torch.normal(mean=torch.ones((batch_size, self.state_dim))).to(device)
+        return torch.zeros((batch_size, self.hidden_dim)).to(device)
+        # return torch.normal(mean=torch.ones((batch_size, self. hidden_dim))).to(device)
 
     # def init_hidden(self, init_input, set_cuda=False):
     #     if set_cuda:
     #         init_input = torch.FloatTensor(init_input).to(device)
     #     return torch.tanh(self.initializer(init_input)).to(device)
 
-    def emb(self, obs, dones, hidden):  # TODO 不是很能确定这个done重置的正不正确
+    def emb(self, obs, hidden):  # TODO 不是很能确定这个done重置的正不正确
         """
         :param obs: obs shape: [seq,batch,feature]或者[seq,feature]
-        :param  dones: [seq, 1]
+        param  dones: [seq, 1]
         :param  hidden: shape [1*num_layer, hidden] or [1*num_layer, batch, hidden]  # 本应输入的hidden
         :return: output: [seq, 1*hidden] or [seq, batch, 1*hidden]
                  h_n: after_hidden state: [num_layer, hidden] or 中间多一batch维度
@@ -88,8 +70,8 @@ class RNN_AC(nn.Module):
         return hidden, embedding
 
     def act(self, x):  # TODO
-        obs, dones, hidden = x
-        hidden, embedding = self.emb(obs, dones, hidden)
+        obs, hidden = x
+        hidden, embedding = self.emb(obs, hidden)
         action_probs = self.actor(embedding)
         dist = Categorical(action_probs)
 
@@ -97,55 +79,101 @@ class RNN_AC(nn.Module):
         action_logprob = dist.log_prob(action)
         state_val = self.critic(embedding)
 
-        return action.detach(), action_logprob.detach(), state_val.detach(), hidden
+        return action.detach(), action_logprob.detach(), state_val.detach(), action_probs.detach(), hidden
 
     def evaluate(self, x, action):
-        # 需要注意，这里将整个流程当作multi batch而不是seq数据
-        obs, dones, hidden = x
-        obs = torch.unsqueeze(obs, dim=0)
+        #
+        obs, hidden = x
+        # obs = torch.unsqueeze(obs, dim=0)
         hidden = torch.unsqueeze(hidden, dim=0)
-        dones = torch.unsqueeze(dones, dim=0).unsqueeze(dim=2)
-        hidden, embedding = self.emb(obs, dones, hidden)
+        # dones = torch.unsqueeze(dones, dim=0).unsqueeze(dim=2)
+        hidden, embedding = self.emb(obs, hidden)
+
+        embedding = embedding.reshape(embedding.shape[0]*embedding.shape[1], embedding.shape[2])
+
         action_probs = self.actor(embedding)
         dist = Categorical(action_probs)
         action_logprobs = dist.log_prob(action)
         dist_entropy = dist.entropy()
         state_values = self.critic(embedding)
 
-        return action_logprobs, state_values, dist_entropy
+        return action_logprobs, state_values, dist_entropy, action_probs
 
 
 class PPO_rnn:
-    def __init__(self, state_dim, action_dim, ac_name="RNN",
+    def __init__(self, state_dim, action_dim, hidden_dim=64, ac_name="RNN",
                  lr_actor=1e-4, lr_critic=1e-4, gamma=0.9, K_epochs=10, eps_clip=0.2):
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
         self.ac_name = ac_name
+        self.global_update_step = 0
+        self.hidden_dim = hidden_dim
 
-        self.buffer = RolloutBuffer()
+        self.buffer = RolloutBuffer(obs_size=state_dim, hidden_size=hidden_dim)
         if ac_name == "RNN":
-            self.policy = RNN_AC(obs_dim=state_dim, action_dim=action_dim).to(device)
+            self.policy = RNN_AC(obs_dim=state_dim, hidden_dim=hidden_dim, action_dim=action_dim).to(device)
             self.optimizer = torch.optim.Adam([
                 {'params': self.policy.pre_embedding.parameters(), 'lr': lr_actor},
                 {'params': self.policy.RNN.parameters(), 'lr': lr_actor},
                 {'params': self.policy.actor.parameters(), 'lr': lr_actor},
                 {'params': self.policy.critic.parameters(), 'lr': lr_critic}
             ])
-
-            self.policy_old = RNN_AC(obs_dim=state_dim, action_dim=action_dim).to(device)
-            self.policy_old.load_state_dict(self.policy.state_dict())
-        # else:  # default
-        #     self.policy = ActorCritic(state_dim, action_dim).to(device)
-        #     self.optimizer = torch.optim.Adam([
-        #         {'params': self.policy.actor.parameters(), 'lr': lr_actor},
-        #         {'params': self.policy.critic.parameters(), 'lr': lr_critic}
-        #     ])
-        #
-        #     self.policy_old = ActorCritic(state_dim, action_dim).to(device)
-        #     self.policy_old.load_state_dict(self.policy.state_dict())
+        self.entropy_coef = 0.01  # 可以存储进state_dict从中恢复
+        self.entropy_coef_step = 0.01 / 100000
 
         self.MseLoss = nn.MSELoss()
+        self.hidden = self.init_hidden()
+
+    def init_hidden(self):
+        return torch.zeros((1, 1, self.hidden_dim)).to(device)
+
+    def play(self, env, state, test=True):
+        if test:
+            self.policy.eval()
+        last_a, last_r, last_d = self.buffer.get_last_action_reward_done()
+        state[49, 1] = last_a
+        state[49, 2] = last_r
+        state = state.reshape(-1)
+        # 在play的时候也准备好了 batch,seq维度
+        tensor_state = torch.FloatTensor(state.reshape(1, 1, -1)).to(device)
+        x = (tensor_state, self.hidden)
+        action, action_logprob, state_val, policy, new_hidden = self.policy.act(x)
+        observation, reward, terminated, truncated, info = env.step(action)
+        if terminated:
+            if self.buffer.step_count < self.buffer.max_eps_length:
+                self.buffer.add_data(
+                    state=torch.from_numpy(state),
+                    hidden=self.hidden.squeeze(),
+                    action=action,
+                    value=state_val.item(),
+                    reward=reward,
+                    done=1,
+                    prob=action_logprob,
+                    policy=policy
+                )
+            self.buffer.batch["dones_indices"][self.buffer.game_count] = self.buffer.step_count
+            self.buffer.game_count += 1
+            self.buffer.step_count = 0
+        else:
+            if self.buffer.step_count < self.buffer.max_eps_length:
+                self.buffer.add_data(
+                    state=torch.from_numpy(state),
+                    hidden=self.hidden.squeeze(),
+                    action=action,
+                    value=state_val.item(),
+                    reward=reward,
+                    done=0,
+                    prob=action_logprob,
+                    policy=policy
+                )
+            self.buffer.step_count += 1
+        # if store hidden here then update it
+        self.hidden = new_hidden
+        if terminated or truncated:
+            self.hidden = self.init_hidden()
+
+        return action, observation, reward, terminated, truncated
 
     def select_action(self, state, hidden):
         # with torch.no_grad():
@@ -164,7 +192,7 @@ class PPO_rnn:
             state = torch.FloatTensor(state).to(device)
             dones = torch.BoolTensor(dones).to(device)
             if self.ac_name == "RNN":
-                x = (state, dones, hidden)
+                x = (state, hidden)
             else:
                 x = state
             action, action_logprob, state_val, hidden = self.policy_old.act(x)
@@ -176,7 +204,68 @@ class PPO_rnn:
 
         return action.item(), hidden
 
-    def update(self):
+    def _entropy_coef_schedule(self):
+        self.entropy_coef -= self.entropy_coef_step
+        if self.entropy_coef <= 0:
+            self.entropy_coef = 0
+
+    def update_new(self, writer):
+        self.policy.train()
+        self.policy.RNN.train()
+        self.buffer.cal_advantages(self.gamma, gae_lambda=0.95)
+        self.buffer.prepare_batch()
+
+        for _ in range(self.K_epochs):
+            mini_batch_generator = self.buffer.mini_batch_generator()
+
+            for mini_batch in mini_batch_generator:
+                for key, v in mini_batch.items():
+                    if key == "values" or key == "probs" or key == "advantages" or key == "hidden":
+                        mini_batch[key] = v.detach().to(device)
+                    else:
+                        mini_batch[key] = v.to(device)
+                B, S = mini_batch["states"].shape
+                # TODO 这里似乎是batch first？ 后面要改过来吗？
+                mini_batch["states"] = mini_batch["states"].view(B // self.buffer.actual_sequence_length,
+                                                                 self.buffer.actual_sequence_length, S)
+                x = (mini_batch["states"], mini_batch["hidden"])
+                # action, action_logprob, val_new, pol_new, _ = self.policy.act(x)
+                log_prob_new, val_new, entropy, pol_new = self.policy.evaluate(x, mini_batch["actions"].view(1, -1))
+                # pol_new, val_new, _, _ = self.policy(mini_batch["states"], mini_batch["h_states"].unsqueeze(0),
+                #                                     mini_batch["c_states"].unsqueeze(0))
+                val_new = val_new.squeeze(1)
+                # log_prob_new, entropy = self.distribution.log_prob(pol_new, mini_batch["actions"].view(1, -1),
+                #                                                    mini_batch["action_mask"])
+                log_prob_new = log_prob_new.squeeze(0)[mini_batch["loss_mask"]]
+                val_new = val_new[mini_batch["loss_mask"]]
+                entropy = entropy[mini_batch["loss_mask"]]
+
+                ratios = torch.exp(log_prob_new - mini_batch["probs"].reshape(-1).detach())
+
+                # Finding Surrogate Loss
+                surr1 = ratios * mini_batch["advantages"]
+                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * mini_batch["advantages"]
+
+                # final loss of clipped objective PPO
+                actor_loss = -torch.min(surr1, surr2)
+                critic_loss = self.MseLoss(mini_batch["values"] + mini_batch["advantages"], val_new)
+
+                writer.add_scalar("Loss/ActorLoss", actor_loss.mean(), global_step=self.global_update_step)
+                writer.add_scalar("Loss/CriticLoss", critic_loss.mean(), global_step=self.global_update_step)
+                writer.add_scalar("Loss/Entropy", entropy.mean(), global_step=self.global_update_step)
+                self.global_update_step += 1
+                total_loss = actor_loss + 0.5 * critic_loss - self.entropy_coef * entropy
+                with torch.autograd.set_detect_anomaly(True):
+                    if not torch.isnan(total_loss).any():
+                        self.optimizer.zero_grad()
+                        total_loss.mean().backward()
+                        nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
+                        self.optimizer.step()
+                        self._entropy_coef_schedule()  # slow down entropy coef
+
+            self.buffer.reset_data()
+
+    def update(self, writer):
         print("before update see actions", self.buffer.actions)
         # Monte Carlo estimate of returns
         rewards = []
@@ -223,7 +312,15 @@ class PPO_rnn:
             surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
 
             # final loss of clipped objective PPO
-            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - 0.01 * dist_entropy
+            actor_loss = -torch.min(surr1, surr2)
+            critic_loss = self.MseLoss(state_values, rewards)
+
+            writer.add_scalar("Loss/ActorLoss", actor_loss.mean(), global_step=self.global_update_step)
+            writer.add_scalar("Loss/CriticLoss", critic_loss.mean(), global_step=self.global_update_step)
+            writer.add_scalar("Loss/Entropy", dist_entropy.mean(), global_step=self.global_update_step)
+            self.global_update_step += 1
+
+            loss = actor_loss + 0.5 * critic_loss - 0.01 * dist_entropy
 
             # take gradient step
             self.optimizer.zero_grad()
@@ -237,8 +334,8 @@ class PPO_rnn:
         self.buffer.clear()
 
     def save(self, checkpoint_path):
-        torch.save(self.policy_old.state_dict(), checkpoint_path)
+        torch.save(self.policy.state_dict(), checkpoint_path)
 
     def load(self, checkpoint_path):
-        self.policy_old.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
+        # self.policy_old.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
         self.policy.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
