@@ -6,10 +6,17 @@ import datetime
 import os
 # from PPO import PPO
 from PPO_RNN import PPO_rnn
+from envs import FetchReturnEnv
+
 # env define
-grid_size = 8
+grid_size = 11
 ac_name = "RNN"
-env = gym.make(f"MiniGrid-DoorKey-{grid_size}x{grid_size}-v0", render_mode="rgb_array")
+env_name = "FetchReturn"  # DoorKey
+more_obs = False
+if env_name == "DoorKey":
+    env = gym.make(f"MiniGrid-DoorKey-{grid_size}x{grid_size}-v0", render_mode="rgb_array")
+elif env_name == "FetchReturn":
+    env = FetchReturnEnv(size=grid_size, render_mode="rgb_array", gen_obstacle=more_obs)
 
 # constant define
 max_ep_len = 100
@@ -21,15 +28,17 @@ eps_clip = 0.2
 gamma = 0.93
 
 # log defines
-log_dir = f"./log/PPO_{ac_name}_DoorKey{grid_size}_" + datetime.datetime.now().strftime('%Y-%m-%d_%H')
+log_dir = f"./log/PPO_{ac_name}_{env_name}{grid_size}{'_obs' if more_obs else ''}_" + datetime.datetime.now().strftime(
+    '%Y-%m-%d_%H')
 os.makedirs(log_dir, exist_ok=True)
 writer = SummaryWriter(log_dir=log_dir)
 
 # agent define
-ppo_agent = PPO_rnn(state_dim=150, action_dim=7, ac_name=ac_name,
-                lr_actor=actor_lr, lr_critic=critic_lr, gamma=gamma, eps_clip=eps_clip)
-ckpt_path = f"./weights/ppo_{ac_name}_grid{grid_size}.pt"
-load_path = "./weights/ppo_RNN_grid8.pt"
+state_dim = 7 * 7 * 3 + 4+2+1+7
+ppo_agent = PPO_rnn(state_dim=state_dim, action_dim=7, ac_name=ac_name,
+                    lr_actor=actor_lr, lr_critic=critic_lr, gamma=gamma, eps_clip=eps_clip)
+ckpt_path = f"./weights/ppo_{ac_name}_{env_name}grid{grid_size}{'_obs' if more_obs else ''}_{datetime.datetime.now().strftime('%Y-%m-%d')}.pt"
+load_path = "./weights/ppo_RNN_FetchReturngrid11_2024-07-22.pt"
 
 # init env and agent
 if load_path is not None and os.path.exists(load_path):
@@ -48,9 +57,9 @@ def train():
 
     for t in range(4000000):
         # print(observation)
-        img = observation["image"].reshape(7*7, 3)
+        img = observation["image"].reshape(7 * 7, 3)
         dir = observation["direction"]
-        state = np.zeros([7*7+1, 3])
+        state = np.zeros([7 * 7 + 1, 3])
         state[49, 0] = dir
         state[:49, :] = img
         # if terminated:
@@ -68,10 +77,10 @@ def train():
         ppo_agent.buffer.rewards.append(reward)
         ppo_agent.buffer.is_terminals.append(terminated)
 
-        if (t+1) % update_timestep == 0:
+        if (t + 1) % update_timestep == 0:
             print(epi, t, epi_reward)
             ppo_agent.update(writer)
-        if (t+1) % 10000 == 0:
+        if (t + 1) % 10000 == 0:
             if last_save_reward < epi_reward:
                 ppo_agent.save(ckpt_path)
                 last_save_reward = epi_reward
@@ -84,7 +93,7 @@ def train():
     writer.close()
 
 
-def play_and_collect_data(test=True, t = 0):
+def play_and_collect_data(writer, test=True, t=0):
     avg_reward = 0
     for i in range(ppo_agent.buffer.num_game_per_batch):
         terminated = False
@@ -92,12 +101,16 @@ def play_and_collect_data(test=True, t = 0):
         observation, info = env.reset()
         while not (terminated or truncated):
             img = observation["image"].reshape(7 * 7, 3)
-            dir = observation["direction"]
-            state = np.zeros([7 * 7 + 1, 3])
-            state[49, 0] = dir
-            state[:49, :] = img
+            other_info = np.zeros(4+2+1+7)
+            other_info[observation["direction"]] = 1  # one-hot dir
+            other_info[observation["has_goal"]+4] = 1  # one-hot hand goal
+
+            state = np.zeros(state_dim)
+            state[:7*7*3] =img.reshape(-1)
+            state[7*7*3:] = other_info
 
             action, observation, reward, terminated, truncated = ppo_agent.play(env, state, test)
+            # print(t, ":  ", action.item(), reward)
             writer.add_scalar("reward", reward, global_step=t)
             t += 1
 
@@ -108,13 +121,15 @@ def play_and_collect_data(test=True, t = 0):
 def train_by_play():
     last_saved_reward = -100
     global_timestep = 0
-    while True:
-        avg_reward, global_timestep = play_and_collect_data(test=False, t=global_timestep)
-        print("avg_reward", avg_reward, t)
+    while global_timestep < int(10 ** grid_size):  # 100000
+        avg_reward, global_timestep = play_and_collect_data(writer, test=False, t=global_timestep)
+        print("avg_reward", avg_reward, global_timestep)
         if avg_reward > last_saved_reward:
             ppo_agent.save(ckpt_path)
             last_saved_reward = avg_reward
         ppo_agent.update_new(writer)
+
+    writer.close()
 
 
 if __name__ == '__main__':

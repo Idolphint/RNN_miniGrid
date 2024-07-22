@@ -8,7 +8,7 @@ device = torch.device("cuda:0")
 
 
 class RNN_AC(nn.Module):
-    def __init__(self, obs_dim, hidden_dim=64, action_dim=7):
+    def __init__(self, obs_dim, hidden_dim=128, action_dim=7):
         super(RNN_AC, self).__init__()
         self.obs_dim = obs_dim
         self.hidden_dim = hidden_dim  # state_dim=hidden_dim=out_dim
@@ -101,7 +101,7 @@ class RNN_AC(nn.Module):
 
 
 class PPO_rnn:
-    def __init__(self, state_dim, action_dim, hidden_dim=64, ac_name="RNN",
+    def __init__(self, state_dim, action_dim, hidden_dim=128, ac_name="RNN",
                  lr_actor=1e-4, lr_critic=1e-4, gamma=0.9, K_epochs=10, eps_clip=0.2):
         self.gamma = gamma
         self.eps_clip = eps_clip
@@ -132,9 +132,8 @@ class PPO_rnn:
         if test:
             self.policy.eval()
         last_a, last_r, last_d = self.buffer.get_last_action_reward_done()
-        state[49, 1] = last_a
-        state[49, 2] = last_r
-        state = state.reshape(-1)
+        state[-8+last_a] = 1
+        state[-1] = last_r
         # 在play的时候也准备好了 batch,seq维度
         tensor_state = torch.FloatTensor(state.reshape(1, 1, -1)).to(device)
         x = (tensor_state, self.hidden)

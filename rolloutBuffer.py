@@ -9,7 +9,7 @@ class RolloutBuffer:
         # self.max_eps_length = config["LSTM"]["max_eps_length"]
         # self.num_game_per_batch = config["num_game_per_batch"]
         self.n_mini_batches = 8
-        self.num_game_per_batch = 16
+        self.num_game_per_batch = 64
         self.seq_length = 0  # 设置为0可以使用eposide的长度
         self.max_eps_length = 500  # ?
         self.action_size = action_size
@@ -281,14 +281,14 @@ class RolloutBuffer_base:
         return sequences, max_length
 
     def prepare_batch(self, data, batch_size=256):
-
+        pass
         # 1. 根据seq end将原始数据分成多个seq
-        for key in self.states:
-            key_seq, max_len = self._pepare_seq_data(key)
-
-            for i, sequence in enumerate(sequences):
-                sequences[i] = self._pad_sequence(sequence, max_sequence_length)
-            samples[key] = torch.stack(sequences, axis=0)
+        # for key in self.states:
+        #     key_seq, max_len = self._pepare_seq_data(key)
+        #
+        #     for i, sequence in enumerate(sequences):
+        #         sequences[i] = self._pad_sequence(sequence, max_sequence_length)
+        #     samples[key] = torch.stack(sequences, axis=0)
         # pad seq
 
         # stack seq and reshape
