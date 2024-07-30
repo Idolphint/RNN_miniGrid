@@ -6,51 +6,60 @@ import datetime
 import os
 from PPO import PPO
 from PPO_RNN import PPO_rnn
-from envs import FetchReturnEnv
-# env define
-env_name = "FetchReturn"  # DoorKey
-more_obs = False
-grid_size = 11
-if env_name == "DoorKey":
-    state_dim = 150
-    env = gym.make(f"MiniGrid-DoorKey-{grid_size}x{grid_size}-v0", render_mode="rgb_array")
-elif env_name == "FetchReturn":
-    state_dim = 7 * 7 * 3 + 4 + 2 + 1 + 7
-    env = FetchReturnEnv(size=grid_size, render_mode="rgb_array", gen_obstacle=more_obs)
+from envs import FetchReturnEnv, CrossingEnv
 
+
+# env define
+grid_size = 9
+agent_view_size = 3
 ac_name = "RNN_replay"
+env_name = "Crossing"  # DoorKey Crossing FetchReturn
+more_obs = False
+state_dim = agent_view_size**2 * 3
+if env_name == "DoorKey":
+    state_dim += 3
+    env = gym.make(f"MiniGrid-DoorKey-{grid_size}x{grid_size}-v0", render_mode="rgb_array", agent_view_size=agent_view_size)
+elif env_name == "FetchReturn":
+    state_dim += 4+2+1+7
+    env = FetchReturnEnv(size=grid_size, render_mode="rgb_array", gen_obstacle=more_obs, agent_view_size=agent_view_size)
+elif env_name == "Crossing":
+    state_dim += 4+2+1+7
+    env = CrossingEnv(size=grid_size, render_mode="rgb_array", agent_view_size=agent_view_size, max_steps=300)
+
+
 if ac_name == "simpleNN":
     ppo_agent = PPO(state_dim=state_dim, action_dim=7)
     ppo_agent.load("./weights/ppo.pt")
 elif ac_name == "RNN":
     ppo_agent = PPO_rnn(state_dim=state_dim, action_dim=7, ac_name="RNN")
-    ppo_agent.load("./weights/ppo_RNN_grid8-very-beginning0715.pt")
+    ppo_agent.load("./weights/ppo_RNN_Crossinggrid11_2024-07-30.pt")
     hidden = ppo_agent.policy.init_hidden()
 elif ac_name == "RNN_replay":
     ppo_agent = PPO_rnn(state_dim=state_dim, action_dim=7, ac_name="RNN")
     # ppo_agent.load("./weights/ppo_RNN_grid5_2024-07-17.pt")
-    ppo_agent.load("./weights/ppo_RNN_FetchReturngrid11_2024-07-22.pt")
+    ppo_agent.load("./weights/ppo_RNN_Crossinggrid9_2024-07-30.pt")
     hidden = ppo_agent.policy.init_hidden()
+
 observation, info = env.reset(seed=42)
 
 frames = []
-for t in range(100):
+for t in range(500):
     # print(observation)
     if env_name == "DoorKey":
-        img = observation["image"].reshape(7*7, 3)
+        img = observation["image"].reshape(agent_view_size**2, 3)
         dir = observation["direction"]
-        state = np.zeros([7*7+1, 3])
+        state = np.zeros([agent_view_size**2+1, 3])
         state[49, 0] = dir
         state[:49, :] = img
-    elif env_name == "FetchReturn":
-        img = observation["image"].reshape(7 * 7, 3)
+    elif env_name == "FetchReturn" or env_name == "Crossing":
+        img = observation["image"].reshape(agent_view_size**2, 3)
         other_info = np.zeros(4 + 2 + 1 + 7)
         other_info[observation["direction"]] = 1  # one-hot dir
         other_info[observation["has_goal"] + 4] = 1  # one-hot hand goal
 
         state = np.zeros(state_dim)
-        state[:7 * 7 * 3] = img.reshape(-1)
-        state[7 * 7 * 3:] = other_info
+        state[:agent_view_size**2 * 3] = img.reshape(-1)
+        state[agent_view_size**2 * 3:] = other_info
 
 
     if ac_name == "simpleNN":
@@ -65,7 +74,7 @@ for t in range(100):
         ppo_agent.buffer.is_terminals.append(terminated)
     elif ac_name == "RNN_replay":
         action, observation, reward, terminated, truncated = ppo_agent.play(env, state, test=True)
-    print("step ", t, action.item(), reward, terminated, truncated)
+    print("step ", t, action.item(), reward, terminated, truncated, observation["has_goal"])
     frame = env.render()
     frames.append(frame)
     # time.sleep(0.3)

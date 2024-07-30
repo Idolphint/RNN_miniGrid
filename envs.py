@@ -1,12 +1,15 @@
 # 定义一个拿完目标再最快返回的任务，环境要有一些障碍，size应当有大有小
 import gymnasium as gym
 from policy import BasePolicy
+import itertools as itt
 
 from minigrid.minigrid_env import MiniGridEnv
 from minigrid.core.grid import Grid
 from minigrid.core.mission import MissionSpace
-from minigrid.core.world_object import Door, Goal, Key, Wall
+from minigrid.core.world_object import Door, Goal, Key, Wall, Lava
 import imageio
+from gymnasium.core import ActType, ObsType
+
 import random
 import matplotlib.pyplot as plt
 import numpy as np
@@ -29,7 +32,7 @@ def Simple_DoorKey():
 
 
 class FetchReturnEnv(MiniGridEnv):
-    def __init__(self, size=5, render_mode="human", gen_obstacle=True):
+    def __init__(self, size=5, render_mode="human", gen_obstacle=True, **kwargs):
         self.size = size
         self.mission = "fetch the goal and return"
         mission_space = MissionSpace(mission_func=self._gen_mission)
@@ -38,7 +41,8 @@ class FetchReturnEnv(MiniGridEnv):
             grid_size=size,
             max_steps=4 * size * size,
             see_through_walls=True,
-            render_mode=render_mode
+            render_mode=render_mode,
+            **kwargs,
         )
         self.start_pos = (1, 1)  # should be random sample
         self.last_pos = (1, 1)
@@ -198,6 +202,159 @@ class FetchReturnEnv(MiniGridEnv):
         obs["has_goal"] = self.has_goal
         self.last_pos = self.agent_pos
         return obs, info
+
+
+class CrossingEnv(MiniGridEnv):
+
+    def __init__(
+            self,
+            size=9,
+            num_crossings=1,
+            obstacle_type=Lava,
+            max_steps=None,
+            **kwargs,
+    ):
+        self.num_crossings = num_crossings
+        self.obstacle_type = obstacle_type
+        self.grid_size = size
+        self.last_pose = (0, 0)
+        self.has_goal = False
+
+        if obstacle_type == Lava:
+            mission_space = MissionSpace(mission_func=self._gen_mission_lava)
+        else:
+            mission_space = MissionSpace(mission_func=self._gen_mission)
+
+        if max_steps is None:
+            max_steps = 4 * size ** 2
+
+        super().__init__(
+            mission_space=mission_space,
+            grid_size=size,
+            see_through_walls=False,  # Set this to True for maximum speed
+            max_steps=max_steps,
+            # agent_view_size=3,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _gen_mission_lava():
+        return "avoid the lava and get to the green goal square"
+
+    @staticmethod
+    def _gen_mission():
+        return "find the opening and get to the green goal square"
+
+    def _gen_grid(self, width, height, agent_pos=None, agent_dir=None):
+        assert width % 2 == 1 and height % 2 == 1  # odd size
+
+        # Create an empty grid
+        self.grid = Grid(width, height)
+
+        # Generate the surrounding walls
+        self.grid.wall_rect(0, 0, width, height)
+
+        # Place a goal square in the bottom-right corner
+        self.put_obj(Goal(), width - 2, height - 2)
+
+        # Place obstacles (lava or walls)
+        v, h = object(), object()  # singleton `vertical` and `horizontal` objects
+
+        # Lava rivers or walls specified by direction and position in grid
+        rivers = [(v, i) for i in range(2, height - 2, 2)]
+        rivers += [(h, j) for j in range(2, width - 2, 2)]
+        self.np_random.shuffle(rivers)
+        rivers = rivers[: self.num_crossings]  # sample random rivers
+        rivers_v = sorted(pos for direction, pos in rivers if direction is v)
+        rivers_h = sorted(pos for direction, pos in rivers if direction is h)
+        obstacle_pos = itt.chain(
+            itt.product(range(1, width - 1), rivers_h),
+            itt.product(rivers_v, range(1, height - 1)),
+        )
+        for i, j in obstacle_pos:
+            self.put_obj(self.obstacle_type(), i, j)
+
+        # Sample path to goal
+        path = [h] * len(rivers_v) + [v] * len(rivers_h)
+        self.np_random.shuffle(path)
+
+        # Create openings
+        limits_v = [0] + rivers_v + [height - 1]
+        limits_h = [0] + rivers_h + [width - 1]
+        room_i, room_j = 0, 0
+        for direction in path:
+            if direction is h:
+                i = limits_v[room_i + 1]
+                j = self.np_random.choice(
+                    range(limits_h[room_j] + 1, limits_h[room_j + 1])
+                )
+                room_i += 1
+            elif direction is v:
+                i = self.np_random.choice(
+                    range(limits_v[room_i] + 1, limits_v[room_i + 1])
+                )
+                j = limits_h[room_j + 1]
+                room_j += 1
+            else:
+                assert False
+            self.grid.set(i, j, None)
+
+        # Place the agent in the top-left corner
+        if agent_pos is not None and agent_dir is not None:
+            self.agent_pos = agent_pos
+            self.agent_dir = agent_dir
+        else:
+            self.place_agent(top=(0, 0), size=(5, 5), rand_dir=True)
+        self.last_pose = self.agent_pos
+        self.mission = (
+            "avoid the lava and get to the green goal square"
+            if self.obstacle_type == Lava
+            else "find the opening and get to the green goal square"
+        )
+
+    def reset(self, seed=None, **kwargs):
+
+        # if reset_start:
+        #     self.put_obj(Goal(), self.grid_size - 2, self.grid_size - 2)
+        #     obs = self.gen_obs()
+        #     return obs, {}
+        # else:
+        self.has_goal = False
+        obs, info = super().reset(seed=seed)
+        obs["has_goal"] = False
+        return obs, info
+
+    def reset_start(self, seed=None):
+        self.put_obj(Goal(), self.grid_size - 2, self.grid_size - 2)
+        obs = self.gen_obs()
+        # while True:
+        self.place_agent(top=(0, 0), size=(5, 5), rand_dir=True)  # place agent本身就不会放在障碍上
+        self.last_pose = self.agent_pos
+        # if self.grid.get(*self.agent_pos) is None:
+        #     break
+        return obs, {}
+
+    def step(
+            self, action: ActType
+    ):
+        obs_, reward_, done_, truncated_, info_ = super().step(action)
+        g_type = self.grid.get(*self.agent_pos)
+        if g_type and g_type.type == 'lava':
+            reward_ = -0.1
+        elif self.agent_pos == self.last_pose:
+            reward_ = -0.00001
+        self.last_pose = self.agent_pos
+        if done_ or truncated_:
+            obs_all, _ = self.reset_start()
+            obs_ = obs_all
+            if done_:
+                done_ = False
+                self.has_goal = True
+            if truncated_:
+                done_ = True
+        obs_["has_goal"] = self.has_goal
+        self.has_goal = False
+        return obs_, reward_, done_, truncated_, info_
 
 
 def play_fetch_return():

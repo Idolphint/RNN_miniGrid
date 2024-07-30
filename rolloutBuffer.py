@@ -9,7 +9,7 @@ class RolloutBuffer:
         # self.max_eps_length = config["LSTM"]["max_eps_length"]
         # self.num_game_per_batch = config["num_game_per_batch"]
         self.n_mini_batches = 8
-        self.num_game_per_batch = 64
+        self.num_game_per_batch = 32
         self.seq_length = 0  # 设置为0可以使用eposide的长度
         self.max_eps_length = 500  # ?
         self.action_size = action_size
